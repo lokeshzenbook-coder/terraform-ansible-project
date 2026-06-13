@@ -1,0 +1,70 @@
+name: Terraform + Ansible Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+workflow_dispatch:
+
+jobs:
+
+  deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Apply
+      working-directory: terraform
+      run: terraform apply -auto-approve
+
+    - name: Create SSH Key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/key.pem
+        chmod 400 ~/.ssh/key.pem
+
+    - name: Install Ansible
+      run: |
+        sudo apt update
+        sudo apt install ansible -y
+
+    - name: Generate Inventory
+      run: |
+        MASTER=$(terraform -chdir=terraform output -raw master_ip)
+
+        terraform -chdir=terraform output -json worker_ips \
+        | jq -r '.[]' > ips.txt
+
+        echo "[webservers]" > ansible/inventory.ini
+
+        while read ip
+        do
+          echo "$ip" >> ansible/inventory.ini
+        done < ips.txt
+
+    - name: Run Ansible
+      run: |
+        ansible-playbook \
+        -i ansible/inventory.ini \
+        ansible/playbook.yml \
+        -u ubuntu \
+        --private-key ~/.ssh/key.pem
