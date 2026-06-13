@@ -51,19 +51,25 @@ jobs:
       - name: Install Ansible
         run: |
           sudo apt-get update
-          sudo apt-get install -y ansible jq
+          sudo apt-get install -y ansible jq openssh-client
 
-      - name: Configure SSH
+      - name: Configure SSH Key
         run: |
           mkdir -p ~/.ssh
 
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-key.pem
-          chmod 400 ~/.ssh/devops-key.pem
+          cat << 'EOF' > ~/.ssh/devops-key.pem
+          ${{ secrets.SSH_PRIVATE_KEY }}
+          EOF
+
+          chmod 600 ~/.ssh/devops-key.pem
+
+          ssh-keygen -l -f ~/.ssh/devops-key.pem
 
           cat > ~/.ssh/config <<EOF
           Host *
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
+            IdentityFile ~/.ssh/devops-key.pem
           EOF
 
           chmod 600 ~/.ssh/config
@@ -96,7 +102,11 @@ jobs:
           echo "Generated Inventory:"
           cat ansible/inventory.ini
 
-      - name: Test SSH Connectivity
+      - name: Validate SSH Key
+        run: |
+          ssh-keygen -y -f ~/.ssh/devops-key.pem > /dev/null
+
+      - name: Test Ansible Connectivity
         run: |
           ansible all \
             -i ansible/inventory.ini \
