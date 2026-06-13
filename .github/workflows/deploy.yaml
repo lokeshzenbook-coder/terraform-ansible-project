@@ -9,11 +9,9 @@ on:
 
 jobs:
   deploy:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -43,10 +41,14 @@ jobs:
         working-directory: terraform
         run: terraform apply -auto-approve
 
+      - name: Show Terraform Outputs
+        run: |
+          terraform -chdir=terraform output
+
       - name: Install Ansible
         run: |
-          sudo apt update
-          sudo apt install ansible jq -y
+          sudo apt-get update
+          sudo apt-get install -y ansible jq
 
       - name: Configure SSH Key
         run: |
@@ -56,26 +58,40 @@ jobs:
 
       - name: Generate Dynamic Inventory
         run: |
-          terraform -chdir=terraform output -json worker_public_ips \
-          | jq -r '.[]' > worker_ips.txt
+          terraform -chdir=terraform output -json worker_ips > workers.json
+
+          echo "Terraform Output:"
+          cat workers.json
+
+          jq -r '.[]' workers.json > worker_ips.txt
 
           echo "[webservers]" > ansible/inventory.ini
 
           COUNT=1
 
-          while read IP
-          do
+          while read -r IP; do
             echo "worker${COUNT} ansible_host=${IP}" >> ansible/inventory.ini
-            COUNT=$((COUNT+1))
+            COUNT=$((COUNT + 1))
           done < worker_ips.txt
 
-          echo "" >> ansible/inventory.ini
-          echo "[webservers:vars]" >> ansible/inventory.ini
-          echo "ansible_user=ubuntu" >> ansible/inventory.ini
-          echo "ansible_ssh_private_key_file=~/.ssh/devops-key.pem" >> ansible/inventory.ini
+          cat >> ansible/inventory.ini <<EOF
+
+          [webservers:vars]
+          ansible_user=ec2-user
+          ansible_ssh_private_key_file=~/.ssh/devops-key.pem
+          EOF
+
+          echo "Generated Inventory:"
+          cat ansible/inventory.ini
+
+      - name: Test Ansible Connectivity
+        run: |
+          ansible all \
+            -i ansible/inventory.ini \
+            -m ping
 
       - name: Run Ansible Playbook
         run: |
           ansible-playbook \
-          -i ansible/inventory.ini \
-          ansible/playbook.yml
+            -i ansible/inventory.ini \
+            ansible/playbook.yml
