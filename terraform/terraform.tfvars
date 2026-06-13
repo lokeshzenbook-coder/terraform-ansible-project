@@ -1,3 +1,3 @@
-aws_region    = "us-east-1"
-instance_type = "t2.micro"
-key_name      = "devops-key"
+worker_count     = 4
+allowed_ssh_cidr = "0.0.0.0/0"   # replace with your IP: "203.0.113.50/32"
+environment      = "dev"
