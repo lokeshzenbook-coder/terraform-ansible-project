@@ -11,6 +11,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -50,11 +53,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ansible jq
 
-      - name: Configure SSH Key
+      - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
+
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-key.pem
           chmod 400 ~/.ssh/devops-key.pem
+
+          cat > ~/.ssh/config <<EOF
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+
+          chmod 600 ~/.ssh/config
 
       - name: Generate Dynamic Inventory
         run: |
@@ -84,11 +96,12 @@ jobs:
           echo "Generated Inventory:"
           cat ansible/inventory.ini
 
-      - name: Test Ansible Connectivity
+      - name: Test SSH Connectivity
         run: |
           ansible all \
             -i ansible/inventory.ini \
-            -m ping
+            -m ping \
+            -vvv
 
       - name: Run Ansible Playbook
         run: |
