@@ -1,3 +1,3 @@
-aws_region   = "us-east-1"
-instance_type = "t3.small"
+aws_region    = "us-east-1"
+instance_type = "t2.micro"
 key_name      = "devops-key"
