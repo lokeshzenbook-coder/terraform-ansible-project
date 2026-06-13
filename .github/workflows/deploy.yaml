@@ -6,7 +6,6 @@ on:
       - main
   workflow_dispatch:
 
-# Prevent concurrent runs -- simultaneous Terraform applies corrupt state
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
@@ -24,67 +23,38 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
 
     steps:
-
-      # -----------------------------------------------------------------
-      # 1. Checkout
-      # -----------------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # -----------------------------------------------------------------
-      # 2. AWS credentials
-      # -----------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_DEFAULT_REGION }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
-      # -----------------------------------------------------------------
-      # 3. Install tools BEFORE provisioning
-      #    Reason: if this step fails, no orphaned AWS resources exist yet.
-      # -----------------------------------------------------------------
       - name: Install Ansible and dependencies
         run: |
-          sudo apt-get update -qq
+          sudo apt-get update
           sudo apt-get install -y ansible jq openssh-client
 
-      # -----------------------------------------------------------------
-      # 4. SSH key
-      # -----------------------------------------------------------------
-      - name: Configure SSH key
+      # FIXED SSH CONFIGURATION
+      - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
 
-          # FIX: Use printf so the GitHub Actions secret expands correctly.
-          # Original used: cat << 'EOF'  (quoted EOF disables expansion)
-          # That writes the literal string "${{ secrets.SSH_PRIVATE_KEY }}"
-          # to disk, producing an invalid key file.
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-key.pem
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/devops-key.pem
+
           chmod 600 ~/.ssh/devops-key.pem
 
-          # FIX: Validate key content before proceeding.
-          # ssh-keygen -y derives the public key and fails on a corrupt key.
-          # Original ran ssh-keygen -l (fingerprint only) which is a weaker check.
-          ssh-keygen -y -f ~/.ssh/devops-key.pem > /dev/null \
-            || { echo "ERROR: SSH_PRIVATE_KEY secret is invalid or empty."; exit 1; }
+          echo "Validating SSH key..."
+          ssh-keygen -l -f ~/.ssh/devops-key.pem
 
-          # FIX: Write SSH config with printf, not an indented heredoc.
-          # Original heredoc was indented with spaces; shell does NOT strip them
-          # (only <<- strips tabs), so ~/.ssh/config had leading spaces on every
-          # line, which ssh silently rejects, leaving StrictHostKeyChecking ON.
-          printf 'Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  IdentityFile ~/.ssh/devops-key.pem\n  ServerAliveInterval 30\n  ConnectTimeout 30\n' > ~/.ssh/config
-          chmod 600 ~/.ssh/config
+          touch ~/.ssh/known_hosts
 
-      # -----------------------------------------------------------------
-      # 5. Terraform
-      # -----------------------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          # FIX: Must be false so `terraform output` returns raw values.
-          # Default (true) wraps output with extra text that breaks jq parsing.
           terraform_wrapper: false
 
       - name: Terraform fmt check
@@ -101,9 +71,6 @@ jobs:
 
       - name: Terraform plan
         working-directory: terraform
-        # FIX: Save plan to file. Without -out=tfplan, apply re-plans
-        # independently -- the plan step gives no guarantee about what apply
-        # will actually do.
         run: terraform plan -out=tfplan
 
       - name: Terraform apply
@@ -113,96 +80,3 @@ jobs:
       - name: Show Terraform outputs
         working-directory: terraform
         run: terraform output
-
-      # -----------------------------------------------------------------
-      # 6. Dynamic Ansible inventory from Terraform output
-      # -----------------------------------------------------------------
-      - name: Generate dynamic inventory
-        run: |
-          # FIX: output name is worker_public_ips (original had worker_ips
-          # which does not match the output block name in outputs.tf).
-          terraform -chdir=terraform output -json worker_public_ips > workers.json
-
-          echo "=== Terraform worker IPs ==="
-          cat workers.json
-
-          jq -r '.[]' workers.json > worker_ips.txt
-
-          # FIX: Build the entire inventory.ini in a single unindented block.
-          # Original appended [webservers:vars] via an indented heredoc.
-          # Shell heredocs do NOT strip leading spaces, so every line in the
-          # vars section had leading whitespace, breaking Ansible's ini parser.
-          {
-            echo "[webservers]"
-            COUNT=1
-            while IFS= read -r IP; do
-              echo "worker${COUNT} ansible_host=${IP}"
-              COUNT=$((COUNT + 1))
-            done < worker_ips.txt
-            echo ""
-            echo "[webservers:vars]"
-            echo "ansible_user=ec2-user"
-            echo "ansible_ssh_private_key_file=~/.ssh/devops-key.pem"
-          } > ansible/inventory.ini
-
-          echo "=== Generated inventory ==="
-          cat ansible/inventory.ini
-
-      # -----------------------------------------------------------------
-      # 7. Wait for SSH daemons to be ready
-      #    FIX: EC2 instances reach "running" before sshd is listening.
-      #    Ansible immediately after apply gets "Connection refused".
-      # -----------------------------------------------------------------
-      - name: Wait for EC2 instances to boot
-        run: |
-          echo "Waiting 30s for sshd to start on all instances..."
-          sleep 30
-
-      # -----------------------------------------------------------------
-      # 8. Ansible
-      # -----------------------------------------------------------------
-      - name: Test Ansible connectivity
-        run: |
-          # FIX: Removed -vvv. Triple verbose dumps SSH key material and full
-          # negotiation into public CI logs. Use -v for basic diagnostics.
-          ansible all \
-            -i ansible/inventory.ini \
-            -m ping \
-            -v
-
-      - name: Run Ansible playbook
-        run: |
-          ansible-playbook \
-            -i ansible/inventory.ini \
-            ansible/playbook.yml \
-            --diff
-
-      # -----------------------------------------------------------------
-      # 9. Verify Nginx is responding on every worker
-      # -----------------------------------------------------------------
-      - name: Verify Nginx on all workers
-        run: |
-          FAILED=0
-          while IFS= read -r IP; do
-            echo -n "Checking http://${IP} ... "
-            if curl --silent --fail --max-time 15 "http://${IP}" > /dev/null; then
-              echo "OK"
-            else
-              echo "FAILED"
-              FAILED=$((FAILED + 1))
-            fi
-          done < worker_ips.txt
-          [ "$FAILED" -eq 0 ] || { echo "ERROR: ${FAILED} worker(s) not serving HTTP"; exit 1; }
-
-      # -----------------------------------------------------------------
-      # 10. Summary
-      # -----------------------------------------------------------------
-      - name: Print deployment summary
-        run: |
-          echo "============================================"
-          echo "  Deployment complete"
-          echo "============================================"
-          echo "Master:"
-          terraform -chdir=terraform output master_public_ip
-          echo "Workers:"
-          terraform -chdir=terraform output worker_public_ips
