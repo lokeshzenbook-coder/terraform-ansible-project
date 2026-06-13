@@ -1,4 +1,4 @@
-name: Terraform-Ansible Deployment
+name: Terraform-Ansible Deployments
 
 on:
   push:
