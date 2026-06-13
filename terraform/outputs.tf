@@ -3,5 +3,5 @@ output "master_ip" {
 }
 
 output "worker_ips" {
-  value = aws_instance.worker[*].public_ip
+  value = aws_instance.worker_nodes[*].public_ip
 }
