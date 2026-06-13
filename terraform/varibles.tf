@@ -1,16 +1,17 @@
-variable "aws_region" {
-  description = "AWS Region"
-  type        = string
-  default     = "us-east-1"
+variable "worker_count" {
+  description = "Number of Ansible worker nodes to provision"
+  type        = number
+  default     = 4
 }
 
-variable "instance_type" {
-  description = "EC2 Instance Type"
+variable "allowed_ssh_cidr" {
+  description = "CIDR allowed to SSH into instances. Restrict to your IP in production."
   type        = string
-  default     = "t2.micro"
+  default     = "0.0.0.0/0"  # override in terraform.tfvars
 }
 
-variable "key_name" {
-  description = "AWS Key Pair Name"
+variable "environment" {
+  description = "Environment label applied as a tag to all resources"
   type        = string
+  default     = "dev"
 }
