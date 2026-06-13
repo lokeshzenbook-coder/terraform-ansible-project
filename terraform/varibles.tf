@@ -1,11 +1,5 @@
-variable "region" {
-  default = "us-east-1"
-}
-
-variable "instance_type" {
-  default = "t3.small"
-}
-
-variable "key_name" {
-  default = "devops-key"
+variable "aws_region" {
+  description = "AWS Region"
+  type        = string
+  default     = "us-east-1"
 }
