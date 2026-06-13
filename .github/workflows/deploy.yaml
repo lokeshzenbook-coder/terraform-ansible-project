@@ -1,70 +1,81 @@
-name: Terraform + Ansible Deployment
+name: Terraform-Ansible Deployment
 
 on:
   push:
     branches:
       - main
 
-workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
-
   deploy:
 
     runs-on: ubuntu-latest
 
     steps:
 
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ap-south-1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-    - name: Terraform Init
-      working-directory: terraform
-      run: terraform init
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
 
-    - name: Terraform Apply
-      working-directory: terraform
-      run: terraform apply -auto-approve
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
 
-    - name: Create SSH Key
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/key.pem
-        chmod 400 ~/.ssh/key.pem
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan
 
-    - name: Install Ansible
-      run: |
-        sudo apt update
-        sudo apt install ansible -y
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve
 
-    - name: Generate Inventory
-      run: |
-        MASTER=$(terraform -chdir=terraform output -raw master_ip)
+      - name: Install Ansible
+        run: |
+          sudo apt update
+          sudo apt install ansible jq -y
 
-        terraform -chdir=terraform output -json worker_ips \
-        | jq -r '.[]' > ips.txt
+      - name: Configure SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/devops-key.pem
+          chmod 400 ~/.ssh/devops-key.pem
 
-        echo "[webservers]" > ansible/inventory.ini
+      - name: Generate Dynamic Inventory
+        run: |
+          terraform -chdir=terraform output -json worker_public_ips \
+          | jq -r '.[]' > worker_ips.txt
 
-        while read ip
-        do
-          echo "$ip" >> ansible/inventory.ini
-        done < ips.txt
+          echo "[webservers]" > ansible/inventory.ini
 
-    - name: Run Ansible
-      run: |
-        ansible-playbook \
-        -i ansible/inventory.ini \
-        ansible/playbook.yml \
-        -u ubuntu \
-        --private-key ~/.ssh/key.pem
+          COUNT=1
+
+          while read IP
+          do
+            echo "worker${COUNT} ansible_host=${IP}" >> ansible/inventory.ini
+            COUNT=$((COUNT+1))
+          done < worker_ips.txt
+
+          echo "" >> ansible/inventory.ini
+          echo "[webservers:vars]" >> ansible/inventory.ini
+          echo "ansible_user=ubuntu" >> ansible/inventory.ini
+          echo "ansible_ssh_private_key_file=~/.ssh/devops-key.pem" >> ansible/inventory.ini
+
+      - name: Run Ansible Playbook
+        run: |
+          ansible-playbook \
+          -i ansible/inventory.ini \
+          ansible/playbook.yml
