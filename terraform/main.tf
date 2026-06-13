@@ -11,11 +11,11 @@ data "aws_ami" "amazon_linux" {
 
 resource "aws_security_group" "ansible_sg" {
 
-  name        = "ansible-sg"
-  description = "Allow SSH and HTTP"
+  name_prefix = "ansible-sg-"
+
+  description = "Ansible Security Group"
 
   ingress {
-    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -23,7 +23,6 @@ resource "aws_security_group" "ansible_sg" {
   }
 
   ingress {
-    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -35,6 +34,10 @@ resource "aws_security_group" "ansible_sg" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ansible-sg"
   }
 }
 
