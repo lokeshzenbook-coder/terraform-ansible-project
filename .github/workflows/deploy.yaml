@@ -38,7 +38,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ansible jq openssh-client
 
-      # FIXED SSH CONFIGURATION
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
@@ -47,10 +46,13 @@ jobs:
 
           chmod 600 ~/.ssh/devops-key.pem
 
-          echo "Validating SSH key..."
+          echo "Validating SSH private key..."
           ssh-keygen -l -f ~/.ssh/devops-key.pem
 
-          touch ~/.ssh/known_hosts
+          echo "Generating public key..."
+          ssh-keygen -y -f ~/.ssh/devops-key.pem > ~/.ssh/devops-key.pem.pub
+
+          ls -la ~/.ssh
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
