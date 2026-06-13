@@ -1,0 +1,27 @@
+---
+- name: Install Nginx and Python
+  hosts: webservers
+  become: true
+
+  tasks:
+
+    - name: Update packages
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install Nginx
+      yum:
+        name: nginx
+        state: present
+
+    - name: Install Python3
+      yum:
+        name: python3
+        state: present
+
+    - name: Start nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
