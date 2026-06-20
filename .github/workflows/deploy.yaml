@@ -1,4 +1,4 @@
-name: Terraform + Ansible Deploys
+name: Terraform + Ansible Deploy
 
 on:
   push:
@@ -17,15 +17,17 @@ jobs:
   deploy:
     name: Provision and Configure
     runs-on: ubuntu-latest
-
     env:
       ANSIBLE_HOST_KEY_CHECKING: "False"
+      ANSIBLE_SSH_RETRIES: "5"
       AWS_DEFAULT_REGION: us-east-1
 
     steps:
+      # ── 1. Source ────────────────────────────────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ── 2. AWS Auth ──────────────────────────────────────────────────────────
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -33,27 +35,34 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
+      # ── 3. Dependencies ──────────────────────────────────────────────────────
       - name: Install Ansible and dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y ansible jq openssh-client
 
+      # ── 4. SSH key ───────────────────────────────────────────────────────────
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
-
           echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/devops-key.pem
-
           chmod 600 ~/.ssh/devops-key.pem
 
           echo "Validating SSH private key..."
-          ssh-keygen -l -f ~/.ssh/devops-key.pem
+          # -E md5 keeps output compatible with both RSA and ED25519 keys
+          ssh-keygen -l -E md5 -f ~/.ssh/devops-key.pem
 
-          echo "Generating public key..."
-          ssh-keygen -y -f ~/.ssh/devops-key.pem > ~/.ssh/devops-key.pem.pub
+          cat >> ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            IdentityFile ~/.ssh/devops-key.pem
+            ConnectTimeout 30
+            ServerAliveInterval 60
+          EOF
+          chmod 600 ~/.ssh/config
 
-          ls -la ~/.ssh
-
+      # ── 5. Terraform ─────────────────────────────────────────────────────────
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -79,6 +88,87 @@ jobs:
         working-directory: terraform
         run: terraform apply -auto-approve tfplan
 
-      - name: Show Terraform outputs
+      # ── 6. Extract EC2 IP (masked) ───────────────────────────────────────────
+      - name: Extract EC2 public IP from Terraform outputs
+        id: tf_outputs
         working-directory: terraform
-        run: terraform output
+        run: |
+          EC2_IP=$(terraform output -raw public_ip 2>/dev/null || terraform output -json | jq -r '.public_ip.value // .instance_public_ip.value // empty')
+
+          if [[ -z "$EC2_IP" ]]; then
+            echo "ERROR: Could not extract public_ip from Terraform outputs."
+            echo "Available outputs:"
+            terraform output -json | jq 'keys'
+            exit 1
+          fi
+
+          # Mask the IP so it never appears in plain logs
+          echo "::add-mask::$EC2_IP"
+          echo "ec2_ip=$EC2_IP" >> "$GITHUB_OUTPUT"
+          echo "EC2 IP extracted and masked successfully."
+
+      # ── 7. Wait for SSH ──────────────────────────────────────────────────────
+      - name: Wait for SSH to be ready on EC2
+        run: |
+          EC2_IP="${{ steps.tf_outputs.outputs.ec2_ip }}"
+          echo "Waiting for SSH on EC2 instance..."
+          for i in $(seq 1 20); do
+            if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+                   -i ~/.ssh/devops-key.pem ec2-user@"$EC2_IP" "echo SSH_OK" 2>/dev/null; then
+              echo "SSH is ready."
+              exit 0
+            fi
+            echo "Attempt $i/20 — retrying in 15s..."
+            sleep 15
+          done
+          echo "ERROR: SSH did not become ready after 5 minutes."
+          exit 1
+
+      # ── 8. Dynamic Ansible inventory ─────────────────────────────────────────
+      - name: Build Ansible inventory
+        run: |
+          EC2_IP="${{ steps.tf_outputs.outputs.ec2_ip }}"
+          mkdir -p ansible
+          cat > ansible/inventory.ini <<EOF
+          [web]
+          $EC2_IP ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/devops-key.pem ansible_python_interpreter=/usr/bin/python3
+
+          [web:vars]
+          ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+          EOF
+          echo "Inventory written."
+          # Print with IP masked (already masked via add-mask above)
+          cat ansible/inventory.ini
+
+      # ── 9. Ansible ping check ────────────────────────────────────────────────
+      - name: Ansible connectivity check
+        working-directory: ansible
+        run: |
+          ansible all -i inventory.ini -m ping
+
+      # ── 10. Run Ansible playbook ─────────────────────────────────────────────
+      - name: Run Ansible playbook
+        working-directory: ansible
+        run: |
+          ansible-playbook \
+            -i inventory.ini \
+            playbook.yml \
+            --diff \
+            -v
+
+      # ── 11. Smoke test ───────────────────────────────────────────────────────
+      - name: Smoke test — verify Nginx is responding
+        run: |
+          EC2_IP="${{ steps.tf_outputs.outputs.ec2_ip }}"
+          echo "Running HTTP smoke test..."
+          for i in $(seq 1 5); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://$EC2_IP" || true)
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              echo "Nginx responding with HTTP 200."
+              exit 0
+            fi
+            echo "Attempt $i/5 — got HTTP $HTTP_CODE, retrying in 10s..."
+            sleep 10
+          done
+          echo "WARNING: Nginx did not respond with HTTP 200 after retries. Check the instance."
+          exit 1
